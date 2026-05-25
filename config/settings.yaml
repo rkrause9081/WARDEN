@@ -1,0 +1,15 @@
+# The Warden runtime configuration
+
+interface: "lo"
+
+engine:
+  threshold_pps: 1.0
+  window_seconds: 5.0
+  cooldown_seconds: 10.0
+
+  whitelist:
+    - "192.168.10.1"
+
+mitigator:
+  ban_duration_seconds: 60.0
+  dry_run: true
