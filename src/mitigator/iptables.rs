@@ -70,9 +70,7 @@ pub struct Mitigator {
 }
 
 impl Mitigator {
-    pub fn ban_duration_seconds(&self) -> f64 {
-    self.ban_duration.as_secs_f64()
-    }
+   
     pub fn new(config: MitigatorConfig) -> Self {
         Self {
             ban_duration: Duration::from_secs_f64(config.ban_duration_seconds),
@@ -149,6 +147,14 @@ impl Mitigator {
     pub fn get_active_bans(&self) -> HashMap<IpAddr, BanRecord> {
         self.bans.clone()
     }
+    pub fn ban_duration_seconds(&self) -> f64 {
+    self.ban_duration.as_secs_f64()
+    }
+
+    pub fn is_dry_run(&self) -> bool {
+        self.dry_run
+    }
+
 
     pub fn get_stats_snapshot(&self) -> MitigatorStats {
         MitigatorStats {

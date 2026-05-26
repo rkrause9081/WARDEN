@@ -1,34 +1,32 @@
-//! The Warden — Rust Phase 5 web dashboard.
-//!
-//! Usage:
-//!
-//! ```bash
-//! cargo run -- demo
-//! sudo ./target/debug/WARDEN sniff
-//! sudo ./target/debug/WARDEN pipeline
-//! sudo ./target/debug/WARDEN dashboard
-//! ```
+//! The Warden — Rust Phase 10 verifier + blockchain anchoring.
 
+mod blockchain;
 mod config;
 mod engine;
+mod evidence;
+mod logging;
 mod mitigator;
 mod pipeline;
 mod sniffer;
 mod types;
 mod ui;
+mod verify;
 
 use std::env;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::thread;
 use std::time::{Duration, SystemTime};
 
+use blockchain::{BlockchainClient, BlockchainConfig};
 use config::Settings;
 use engine::{Engine, EngineConfig};
+use logging::JsonlLogger;
 use mitigator::{Mitigator, MitigatorConfig};
 use pipeline::run_live_pipeline;
 use sniffer::Sniffer;
 use types::{MessageType, PacketRecord, Protocol};
-use ui::{DashboardState, start_dashboard};
+use ui::{start_dashboard, DashboardState};
+use verify::verifier::{print_verification_report, verify_alert_log_file};
 
 fn ip(value: [u8; 4]) -> IpAddr {
     IpAddr::V4(Ipv4Addr::from(value))
@@ -42,8 +40,20 @@ fn main() {
 
     match args.get(1).map(String::as_str) {
         Some("sniff") => run_live_sniffer(&settings),
+
         Some("pipeline") => run_pipeline(&settings, false),
+
         Some("dashboard") => run_pipeline(&settings, true),
+
+        Some("verify") => {
+            let path = args
+                .get(2)
+                .map(String::as_str)
+                .unwrap_or("logs/alerts.jsonl");
+
+            run_verify(path);
+        }
+
         _ => run_demo(&settings),
     }
 }
@@ -59,6 +69,48 @@ fn build_engine(settings: &Settings) -> Engine {
     Engine::new(config)
 }
 
+fn build_logger() -> Option<JsonlLogger> {
+    match JsonlLogger::default_logger() {
+        Ok(logger) => {
+            println!("JSONL logging enabled: logs/alerts.jsonl, logs/bans.jsonl");
+            Some(logger)
+        }
+        Err(error) => {
+            eprintln!("JSONL logging disabled: {error}");
+            None
+        }
+    }
+}
+
+fn build_blockchain_client() -> Option<BlockchainClient> {
+    let config = match BlockchainConfig::from_env() {
+        Ok(config) => config,
+        Err(error) => {
+            println!("Blockchain logging disabled: {error}");
+            return None;
+        }
+    };
+
+    if !config.enabled {
+        println!("Blockchain logging disabled: WARDEN_BLOCKCHAIN_ENABLED is not true");
+        return None;
+    }
+
+    let runtime = tokio::runtime::Runtime::new()
+        .expect("failed to create tokio runtime for blockchain client");
+
+    match runtime.block_on(BlockchainClient::from_config(config)) {
+        Ok(client) => {
+            println!("Blockchain logging enabled.");
+            Some(client)
+        }
+        Err(error) => {
+            eprintln!("Blockchain logging disabled: {error}");
+            None
+        }
+    }
+}
+
 fn run_demo(settings: &Settings) {
     let mut engine = build_engine(settings);
 
@@ -66,7 +118,7 @@ fn run_demo(settings: &Settings) {
     let dst_ip = ip([192, 168, 10, 1]);
     let base = SystemTime::now();
 
-    println!("The Warden Rust Phase 5 demo");
+    println!("The Warden Rust Phase 10 demo");
     println!("Feeding sample MQTT packets from {attacker_ip}...");
 
     for offset in 0..5 {
@@ -88,7 +140,7 @@ fn run_live_sniffer(settings: &Settings) {
     let mut engine = build_engine(settings);
     let mut sniffer = Sniffer::new(&settings.interface);
 
-    println!("The Warden Rust Phase 5 direct sniffer");
+    println!("The Warden Rust Phase 10 direct sniffer");
     println!("Interface: {}", settings.interface);
     println!("Press Ctrl+C to stop.");
 
@@ -116,8 +168,15 @@ fn run_live_sniffer(settings: &Settings) {
     println!("CoAP packets     : {}", sniffer_stats.coap);
 }
 
+fn run_verify(path: &str) {
+    match verify_alert_log_file(path) {
+        Ok(results) => print_verification_report(&results),
+        Err(error) => eprintln!("Verification failed: {error}"),
+    }
+}
+
 fn run_pipeline(settings: &Settings, with_dashboard: bool) {
-    println!("The Warden Rust Phase 5 pipeline");
+    println!("The Warden Rust Phase 10 pipeline");
     println!("Interface : {}", settings.interface);
     println!(
         "Mode      : {}",
@@ -153,6 +212,9 @@ fn run_pipeline(settings: &Settings, with_dashboard: bool) {
         None
     };
 
+    let logger = build_logger();
+    let blockchain_client = build_blockchain_client();
+
     println!("Press Ctrl+C to stop.");
 
     let engine = build_engine(settings);
@@ -167,13 +229,18 @@ fn run_pipeline(settings: &Settings, with_dashboard: bool) {
         engine,
         mitigator,
         dashboard_state,
+        logger,
+        blockchain_client,
     ) {
         eprintln!("Pipeline error: {error}");
     }
 }
 
 fn handle_record(engine: &mut Engine, record: PacketRecord) {
-    if let Some(alert) = engine.ingest(record) {
+    if let Some(mut alert) = engine.ingest(record) {
+        alert.evidence_hash =
+            Some(crate::evidence::compute_alert_evidence_hash(&alert));
+
         println!(
             "ALERT: {} flood from {} at {:.1} PPS, message type: {}",
             alert.protocol.as_str(),
