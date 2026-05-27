@@ -1,18 +1,23 @@
 //! Sliding-window PPS detection engine.
 //!
-//! This is the Rust Phase 1 port of the Python `engine.py` logic.
-//! It is synchronous for now so it stays easy to test.
-//!
-//! Later pipeline:
-//! Sniffer -> PacketRecord -> Engine::ingest() -> Option<AlertEvent> -> Mitigator
+//! Protocol-aware detection:
+//! - MQTT and CoAP are tracked independently per source IP.
+//! - A MQTT cooldown will not suppress a CoAP alert from the same IP.
+//! - Dashboard PPS still reports total traffic per IP across protocols.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::IpAddr;
 use std::time::{Duration, SystemTime};
 
-use crate::types::{AlertEvent, PacketRecord};
+use crate::types::{AlertEvent, PacketRecord, Protocol};
 
-/// Per-IP sliding-window statistics.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct AttackKey {
+    src_ip: IpAddr,
+    protocol: Protocol,
+}
+
+/// Per source-IP/protocol sliding-window statistics.
 #[derive(Debug, Clone)]
 struct IpStats {
     timestamps: VecDeque<SystemTime>,
@@ -72,7 +77,11 @@ pub struct Engine {
     window: Duration,
     cooldown: Duration,
     whitelist: HashSet<IpAddr>,
-    stats_by_ip: HashMap<IpAddr, IpStats>,
+
+    /// Tracks traffic by `(source IP, protocol)` so MQTT and CoAP floods do not
+    /// suppress each other through a shared cooldown.
+    stats_by_key: HashMap<AttackKey, IpStats>,
+
     total_ingested: u64,
     total_alerts: u64,
 }
@@ -84,7 +93,7 @@ impl Engine {
             window: Duration::from_secs_f64(config.window_seconds),
             cooldown: Duration::from_secs_f64(config.cooldown_seconds),
             whitelist: config.whitelist,
-            stats_by_ip: HashMap::new(),
+            stats_by_key: HashMap::new(),
             total_ingested: 0,
             total_alerts: 0,
         }
@@ -98,10 +107,12 @@ impl Engine {
 
         let now = record.timestamp;
 
-        let stats = self
-            .stats_by_ip
-            .entry(record.src_ip)
-            .or_insert_with(IpStats::new);
+        let key = AttackKey {
+            src_ip: record.src_ip,
+            protocol: record.protocol.clone(),
+        };
+
+        let stats = self.stats_by_key.entry(key).or_insert_with(IpStats::new);
 
         stats.total_packets += 1;
         stats.timestamps.push_back(now);
@@ -140,12 +151,27 @@ impl Engine {
         })
     }
 
-    /// Current PPS for one source IP.
+    /// Current total PPS for one source IP across all protocols.
     pub fn get_pps(&self, src_ip: &IpAddr) -> f64 {
-        let Some(stats) = self.stats_by_ip.get(src_ip) else {
-            return 0.0;
-        };
+        self.stats_by_key
+            .iter()
+            .filter(|(key, _)| &key.src_ip == src_ip)
+            .map(|(_, stats)| self.get_stats_pps(stats))
+            .sum()
+    }
 
+    /// Current PPS for one source IP and protocol.
+    pub fn get_protocol_pps(&self, src_ip: &IpAddr, protocol: &Protocol) -> f64 {
+        self.stats_by_key
+            .get(&AttackKey {
+                src_ip: *src_ip,
+                protocol: protocol.clone(),
+            })
+            .map(|stats| self.get_stats_pps(stats))
+            .unwrap_or(0.0)
+    }
+
+    fn get_stats_pps(&self, stats: &IpStats) -> f64 {
         let now = SystemTime::now();
 
         let active_count = stats
@@ -161,15 +187,19 @@ impl Engine {
         active_count as f64 / self.window.as_secs_f64()
     }
 
-    /// Current PPS for all tracked source IPs.
+    /// Current total PPS for all tracked source IPs.
     pub fn get_all_pps(&self) -> HashMap<IpAddr, f64> {
-        self.stats_by_ip
-            .keys()
-            .map(|ip| (*ip, self.get_pps(ip)))
-            .collect()
+        let mut totals = HashMap::new();
+
+        for (key, stats) in &self.stats_by_key {
+            let pps = self.get_stats_pps(stats);
+            *totals.entry(key.src_ip).or_insert(0.0) += pps;
+        }
+
+        totals
     }
 
-    /// Top talkers by current PPS, descending.
+    /// Top talkers by current total PPS, descending.
     pub fn get_top_talkers(&self, limit: usize) -> Vec<(IpAddr, f64)> {
         let mut talkers: Vec<(IpAddr, f64)> = self.get_all_pps().into_iter().collect();
 
@@ -183,16 +213,23 @@ impl Engine {
         talkers
     }
 
-    /// Clear tracking data for one source IP.
+    /// Clear tracking data for one source IP across all protocols.
     pub fn reset_ip(&mut self, src_ip: &IpAddr) {
-        self.stats_by_ip.remove(src_ip);
+        self.stats_by_key.retain(|key, _| &key.src_ip != src_ip);
     }
 
     pub fn get_stats_snapshot(&self) -> EngineStatsSnapshot {
+        let tracked_ips = self
+            .stats_by_key
+            .keys()
+            .map(|key| key.src_ip)
+            .collect::<HashSet<_>>()
+            .len();
+
         EngineStatsSnapshot {
             total_ingested: self.total_ingested,
             total_alerts: self.total_alerts,
-            tracked_ips: self.stats_by_ip.len(),
+            tracked_ips,
             threshold_pps: self.threshold_pps,
             window_seconds: self.window.as_secs_f64(),
         }
@@ -228,13 +265,18 @@ mod tests {
         IpAddr::V4(Ipv4Addr::from(value))
     }
 
-    fn test_record(src_ip: IpAddr, timestamp: SystemTime) -> PacketRecord {
+    fn test_record(
+        src_ip: IpAddr,
+        timestamp: SystemTime,
+        protocol: Protocol,
+        msg_type: &str,
+    ) -> PacketRecord {
         PacketRecord::with_timestamp(
             timestamp,
             src_ip,
             ip([192, 168, 10, 1]),
-            Protocol::MQTT,
-            MessageType::Known("PUBLISH".to_string()),
+            protocol,
+            MessageType::Known(msg_type.to_string()),
         )
     }
 
@@ -250,8 +292,8 @@ mod tests {
         let src = ip([192, 168, 10, 50]);
         let base = SystemTime::UNIX_EPOCH + Duration::from_secs(100);
 
-        assert!(engine.ingest(test_record(src, base)).is_none());
-        assert!(engine.ingest(test_record(src, base + Duration::from_secs(1))).is_none());
+        assert!(engine.ingest(test_record(src, base, Protocol::MQTT, "PUBLISH")).is_none());
+        assert!(engine.ingest(test_record(src, base + Duration::from_secs(1), Protocol::MQTT, "PUBLISH")).is_none());
 
         let snapshot = engine.get_stats_snapshot();
         assert_eq!(snapshot.total_ingested, 2);
@@ -272,11 +314,21 @@ mod tests {
 
         for offset in 0..4 {
             assert!(engine
-                .ingest(test_record(src, base + Duration::from_secs(offset)))
+                .ingest(test_record(
+                    src,
+                    base + Duration::from_secs(offset),
+                    Protocol::MQTT,
+                    "PUBLISH",
+                ))
                 .is_none());
         }
 
-        let alert = engine.ingest(test_record(src, base + Duration::from_secs(4)));
+        let alert = engine.ingest(test_record(
+            src,
+            base + Duration::from_secs(4),
+            Protocol::MQTT,
+            "PUBLISH",
+        ));
         assert!(alert.is_some());
 
         let alert = alert.unwrap();
@@ -286,7 +338,50 @@ mod tests {
     }
 
     #[test]
-    fn respects_alert_cooldown() {
+    fn protocol_cooldowns_are_independent() {
+        let mut engine = Engine::new(EngineConfig::new(
+            1.0,
+            5.0,
+            10.0,
+            Vec::<IpAddr>::new(),
+        ));
+
+        let src = ip([127, 0, 0, 1]);
+        let base = SystemTime::UNIX_EPOCH + Duration::from_secs(100);
+
+        for offset in 0..5 {
+            engine.ingest(test_record(
+                src,
+                base + Duration::from_secs(offset),
+                Protocol::MQTT,
+                "PUBLISH",
+            ));
+        }
+
+        for offset in 0..4 {
+            assert!(engine
+                .ingest(test_record(
+                    src,
+                    base + Duration::from_secs(offset),
+                    Protocol::CoAP,
+                    "GET",
+                ))
+                .is_none());
+        }
+
+        let coap_alert = engine.ingest(test_record(
+            src,
+            base + Duration::from_secs(4),
+            Protocol::CoAP,
+            "GET",
+        ));
+
+        assert!(coap_alert.is_some());
+        assert_eq!(coap_alert.unwrap().protocol, Protocol::CoAP);
+    }
+
+    #[test]
+    fn respects_alert_cooldown_per_protocol() {
         let mut engine = Engine::new(EngineConfig::new(
             1.0,
             5.0,
@@ -298,22 +393,39 @@ mod tests {
         let base = SystemTime::UNIX_EPOCH + Duration::from_secs(100);
 
         for offset in 0..5 {
-            engine.ingest(test_record(src, base + Duration::from_secs(offset)));
+            engine.ingest(test_record(
+                src,
+                base + Duration::from_secs(offset),
+                Protocol::MQTT,
+                "PUBLISH",
+            ));
         }
 
-        // Still above threshold, but cooldown has not elapsed.
-        let alert = engine.ingest(test_record(src, base + Duration::from_secs(5)));
+        let alert = engine.ingest(test_record(
+            src,
+            base + Duration::from_secs(5),
+            Protocol::MQTT,
+            "PUBLISH",
+        ));
         assert!(alert.is_none());
 
-        // Cooldown elapsed, but we need enough packets inside the current
-        // 5-second window to reach 1 PPS again.
         for offset in 15..19 {
             assert!(engine
-                .ingest(test_record(src, base + Duration::from_secs(offset)))
+                .ingest(test_record(
+                    src,
+                    base + Duration::from_secs(offset),
+                    Protocol::MQTT,
+                    "PUBLISH",
+                ))
                 .is_none());
         }
 
-        let alert = engine.ingest(test_record(src, base + Duration::from_secs(19)));
+        let alert = engine.ingest(test_record(
+            src,
+            base + Duration::from_secs(19),
+            Protocol::MQTT,
+            "PUBLISH",
+        ));
         assert!(alert.is_some());
     }
 
@@ -332,7 +444,12 @@ mod tests {
 
         for offset in 0..10 {
             assert!(engine
-                .ingest(test_record(broker, base + Duration::from_secs(offset)))
+                .ingest(test_record(
+                    broker,
+                    base + Duration::from_secs(offset),
+                    Protocol::MQTT,
+                    "PUBLISH",
+                ))
                 .is_none());
         }
 
@@ -342,7 +459,7 @@ mod tests {
     }
 
     #[test]
-    fn reset_ip_clears_tracking_data() {
+    fn reset_ip_clears_tracking_data_for_all_protocols() {
         let src = ip([192, 168, 10, 90]);
 
         let mut engine = Engine::new(EngineConfig::new(
@@ -354,7 +471,8 @@ mod tests {
 
         let base = SystemTime::UNIX_EPOCH + Duration::from_secs(100);
 
-        engine.ingest(test_record(src, base));
+        engine.ingest(test_record(src, base, Protocol::MQTT, "PUBLISH"));
+        engine.ingest(test_record(src, base, Protocol::CoAP, "GET"));
         assert_eq!(engine.get_stats_snapshot().tracked_ips, 1);
 
         engine.reset_ip(&src);

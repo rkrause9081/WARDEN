@@ -4,23 +4,31 @@ use sha2::{Digest, Sha256};
 
 use crate::types::AlertEvent;
 
-/// Compute a deterministic evidence hash for an alert.
+/// Compute a SHA-256 evidence hash for an alert.
 ///
-/// This intentionally hashes stable forensic fields only:
+/// The hash includes:
 /// - source IP
 /// - protocol
 /// - message type
 /// - PPS rounded to 3 decimal places
+/// - alert timestamp in milliseconds
 ///
-/// The timestamp is excluded so tests and replay verification stay deterministic.
-/// The JSONL log still stores `logged_at` separately.
+/// Including the timestamp prevents repeated identical attacks from producing
+/// the same evidence hash, which avoids duplicate-hash contract reverts.
 pub fn compute_alert_evidence_hash(alert: &AlertEvent) -> [u8; 32] {
+    let timestamp_millis = alert
+        .timestamp
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or(0);
+
     let canonical = format!(
-        "src_ip={}|protocol={}|msg_type={}|pps={:.3}",
+        "src_ip={}|protocol={}|msg_type={}|pps={:.3}|timestamp_ms={}",
         alert.src_ip,
         alert.protocol.as_str(),
         alert.msg_type.as_str(),
         alert.pps,
+        timestamp_millis,
     );
 
     let digest = Sha256::digest(canonical.as_bytes());
@@ -39,27 +47,29 @@ mod tests {
     use super::*;
     use crate::types::{AlertEvent, MessageType, Protocol};
     use std::net::{IpAddr, Ipv4Addr};
-    use std::time::SystemTime;
+    use std::time::{Duration, SystemTime};
 
     fn ip(value: [u8; 4]) -> IpAddr {
         IpAddr::V4(Ipv4Addr::from(value))
     }
 
-    fn test_alert() -> AlertEvent {
+    fn test_alert(timestamp: SystemTime) -> AlertEvent {
         AlertEvent {
             src_ip: ip([192, 168, 10, 90]),
             protocol: Protocol::MQTT,
             msg_type: MessageType::Known("PUBLISH".to_string()),
             pps: 42.0,
-            timestamp: SystemTime::now(),
+            timestamp,
             evidence_hash: None,
         }
     }
 
     #[test]
-    fn same_alert_produces_same_hash() {
-        let alert_a = test_alert();
-        let alert_b = test_alert();
+    fn same_alert_same_timestamp_produces_same_hash() {
+        let timestamp = SystemTime::UNIX_EPOCH + Duration::from_secs(100);
+
+        let alert_a = test_alert(timestamp);
+        let alert_b = test_alert(timestamp);
 
         assert_eq!(
             compute_alert_evidence_hash(&alert_a),
@@ -68,8 +78,19 @@ mod tests {
     }
 
     #[test]
+    fn same_alert_different_timestamp_produces_different_hash() {
+        let alert_a = test_alert(SystemTime::UNIX_EPOCH + Duration::from_secs(100));
+        let alert_b = test_alert(SystemTime::UNIX_EPOCH + Duration::from_secs(101));
+
+        assert_ne!(
+            compute_alert_evidence_hash(&alert_a),
+            compute_alert_evidence_hash(&alert_b)
+        );
+    }
+
+    #[test]
     fn hash_hex_is_64_chars() {
-        let hash = compute_alert_evidence_hash(&test_alert());
+        let hash = compute_alert_evidence_hash(&test_alert(SystemTime::now()));
         let hex = hash_bytes_to_hex(hash);
 
         assert_eq!(hex.len(), 64);
@@ -77,8 +98,10 @@ mod tests {
 
     #[test]
     fn different_pps_changes_hash() {
-        let mut alert_a = test_alert();
-        let mut alert_b = test_alert();
+        let timestamp = SystemTime::UNIX_EPOCH + Duration::from_secs(100);
+
+        let mut alert_a = test_alert(timestamp);
+        let mut alert_b = test_alert(timestamp);
 
         alert_a.pps = 42.0;
         alert_b.pps = 43.0;

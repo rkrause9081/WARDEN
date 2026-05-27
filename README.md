@@ -139,8 +139,8 @@ npx hardhat node
 
 ## Deploy contracts
 
-```bash
-npx hardhat run scripts/deploy.js --network localhost
+```bashnpx h
+hardhat run scripts/deploy.js --network localhost
 ```
 
 ## Export environment variables
@@ -149,9 +149,9 @@ npx hardhat run scripts/deploy.js --network localhost
 export WARDEN_BLOCKCHAIN_ENABLED=true
 export WARDEN_RPC_URL=http://127.0.0.1:8545
 export WARDEN_CHAIN_ID=31337
-export WARDEN_FACTORY_ADDRESS=<factory_address>
-export WARDEN_EVIDENCE_ADDRESS=<registry_address>
-export WARDEN_PRIVATE_KEY=<private_key>
+export WARDEN_FACTORY_ADDRESS=0x5FbDB2315678afecb367f032d93F642f64180aa3
+export WARDEN_EVIDENCE_ADDRESS=0xa16E02E87b7454126E5E10d957A927A7F5B5d2be
+export WARDEN_PRIVATE_KEY=0x70997970c51812dc3a010c7d01b50e0d17dc79c8
 ```
 
 ---

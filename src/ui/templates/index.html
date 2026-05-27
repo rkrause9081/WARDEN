@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>The Warden</title>
+    <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+<header class="topbar">
+    <div>
+        <h1>THE WARDEN <span>Rust IPS Dashboard</span></h1>
+        <p>Industrial MQTT/CoAP intrusion detection, mitigation, evidence, and chain telemetry.</p>
+    </div>
+    <div class="status-pill" id="chain-status">LIVE</div>
+</header>
+
+<main class="layout">
+    <section class="metric-card">
+        <div class="label">Packets Seen</div>
+        <div class="value" id="packets">0</div>
+    </section>
+    <section class="metric-card danger-card">
+        <div class="label">Alerts Seen</div>
+        <div class="value danger" id="alerts">0</div>
+    </section>
+    <section class="metric-card danger-card">
+        <div class="label">Bans Seen</div>
+        <div class="value danger" id="bans">0</div>
+    </section>
+    <section class="metric-card">
+        <div class="label">Peak PPS</div>
+        <div class="value" id="peak-pps">0</div>
+    </section>
+
+    <section class="card">
+        <div class="card-title">Protocol Counts</div>
+        <div class="protocol-grid">
+            <div class="mini-stat">
+                <span>MQTT</span>
+                <strong id="mqtt-count">0</strong>
+            </div>
+            <div class="mini-stat">
+                <span>CoAP</span>
+                <strong id="coap-count">0</strong>
+            </div>
+        </div>
+    </section>
+
+    <section class="card">
+        <div class="card-title">Current Traffic</div>
+        <div class="table" id="top-talkers"><div class="muted">No traffic yet</div></div>
+    </section>
+
+    <section class="card wide">
+        <div class="card-title">Live Attack Feed</div>
+        <div class="feed" id="attack-feed"><div class="muted">No alerts yet</div></div>
+    </section>
+
+    <section class="card wide">
+        <div class="card-title">Incident Timeline</div>
+        <div class="timeline" id="timeline"><div class="muted">Awaiting events</div></div>
+    </section>
+
+    <section class="card wide">
+        <div class="card-title">Active Bans</div>
+        <div class="table" id="active-bans"><div class="muted">No bans active</div></div>
+    </section>
+
+    <section class="card wide">
+        <div class="card-title">Blockchain Evidence</div>
+        <div class="chain-grid" id="blockchain-events"><div class="muted">No chain events yet</div></div>
+    </section>
+
+    <section class="card full">
+        <div class="card-title">Evidence Verification</div>
+        <div class="verify-panel">
+            <input id="verify-file" type="file" accept=".jsonl,.txt,application/json">
+            <button id="verify-button">Verify alerts.jsonl</button>
+            <span id="verify-status" class="muted">Upload an alerts.jsonl file to verify evidence hashes.</span>
+        </div>
+        <div id="verify-results" class="verify-results"></div>
+    </section>
+</main>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
