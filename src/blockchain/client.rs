@@ -137,6 +137,10 @@ impl BlockchainClient {
         self.enabled
     }
 
+    pub fn registry_address(&self) -> String {
+        format!("{:?}", self.contract.address())
+    }
+
     pub async fn log_attack(&self, alert: ChainAlert) -> Result<H256, String> {
         if !self.enabled {
             return Err("blockchain logging is disabled".to_string());

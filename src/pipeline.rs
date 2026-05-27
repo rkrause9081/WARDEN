@@ -1,7 +1,6 @@
 //! Runtime pipeline for The Warden.
 //!
-//! Phase 9:
-//! Sniffer -> Engine -> JSONL -> Mitigator -> optional blockchain anchoring
+//! Sniffer -> Engine -> JSONL -> Mitigator -> optional blockchain anchoring -> Dashboard telemetry
 
 use std::sync::mpsc;
 use std::thread;
@@ -44,6 +43,8 @@ pub fn run_live_pipeline(
             );
 
             let src_ip = record.src_ip;
+            let dst_ip = record.dst_ip;
+            let protocol = record.protocol.clone();
 
             if let Some(mut alert) = engine.ingest(record) {
                 let evidence_hash = compute_alert_evidence_hash(&alert);
@@ -79,7 +80,7 @@ pub fn run_live_pipeline(
                 let pps = engine.get_pps(&src_ip);
 
                 if let Ok(mut state) = state.lock() {
-                    state.record_packet(src_ip, pps);
+                    state.record_packet(src_ip, dst_ip, protocol, pps);
                 }
             }
         }
@@ -94,6 +95,12 @@ pub fn run_live_pipeline(
         println!("Mitigator thread started.");
 
         mitigator.start();
+
+        if let Some(state) = &mitigator_dashboard {
+            if let Ok(mut state) = state.lock() {
+                state.set_mitigator_mode(mitigator.is_dry_run());
+            }
+        }
 
         let runtime = tokio::runtime::Runtime::new()
             .expect("failed to create blockchain tokio runtime");
@@ -118,23 +125,6 @@ pub fn run_live_pipeline(
                 }
             }
 
-            if let Some(client) = &blockchain_client {
-                if client.is_enabled() {
-                    if let Some(chain_alert) = ChainAlert::from_alert(&alert, mitigated) {
-                        let result = runtime.block_on(client.log_attack(chain_alert));
-
-                        match result {
-                            Ok(tx_hash) => {
-                                println!("CHAIN: attack evidence anchored in tx {tx_hash:?}");
-                            }
-                            Err(error) => {
-                                eprintln!("Blockchain logging failed: {error}");
-                            }
-                        }
-                    }
-                }
-            }
-
             if let Some(state) = &mitigator_dashboard {
                 if let Ok(mut state) = state.lock() {
                     state.record_ban(
@@ -142,7 +132,49 @@ pub fn run_live_pipeline(
                         alert.protocol.as_str().to_string(),
                         alert.pps,
                         mitigator.ban_duration_seconds(),
+                        mitigator.is_dry_run(),
                     );
+                }
+            }
+
+            if let Some(client) = &blockchain_client {
+                if client.is_enabled() {
+                    if let Some(chain_alert) = ChainAlert::from_alert(&alert, mitigated) {
+                        let tx_result = runtime.block_on(client.log_attack(chain_alert));
+
+                        match tx_result {
+                            Ok(tx_hash) => {
+                                let tx_hash_string = format!("{:?}", tx_hash);
+                                println!("CHAIN: attack evidence anchored in tx {tx_hash_string}");
+
+                                if let Some(state) = &mitigator_dashboard {
+                                    if let Ok(mut state) = state.lock() {
+                                        state.record_blockchain_event(
+                                            tx_hash_string,
+                                            alert.evidence_hash,
+                                            Some(client.registry_address()),
+                                            alert.src_ip.to_string(),
+                                            alert.protocol.as_str().to_string(),
+                                            "ANCHORED".to_string(),
+                                        );
+                                    }
+                                }
+                            }
+                            Err(error) => {
+                                eprintln!("Blockchain logging failed: {error}");
+
+                                if let Some(state) = &mitigator_dashboard {
+                                    if let Ok(mut state) = state.lock() {
+                                        state.record_blockchain_error(
+                                            alert.src_ip.to_string(),
+                                            alert.protocol.as_str().to_string(),
+                                            error,
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
