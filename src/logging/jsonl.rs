@@ -5,12 +5,19 @@
 //! logs/alerts.jsonl
 //! logs/bans.jsonl
 //!
-//! Phase 7 adds cryptographic evidence hashes suitable for future blockchain anchoring.
+//! Phase 7 adds cryptographic evidence hashes suitable for blockchain anchoring.
+//!
+//! Important verifier detail:
+//! `alert_timestamp_ms` is written alongside the evidence hash because the
+//! evidence hash includes the original alert timestamp. `logged_at` is when the
+//! logger wrote the row, which can be a few micro/milliseconds later and should
+//! not be used for hash verification.
 
 use std::fs::{create_dir_all, OpenOptions};
 use std::io::Write;
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
+use std::time::UNIX_EPOCH;
 
 use chrono::{DateTime, Utc};
 use serde::Serialize;
@@ -98,6 +105,11 @@ impl JsonlLogger {
 #[derive(Debug, Clone, Serialize)]
 struct AlertLogRecord {
     logged_at: DateTime<Utc>,
+
+    /// The exact timestamp used by `compute_alert_evidence_hash`.
+    /// The verifier must use this, not `logged_at`.
+    alert_timestamp_ms: u128,
+
     src_ip: String,
     protocol: String,
     msg_type: String,
@@ -108,8 +120,15 @@ struct AlertLogRecord {
 
 impl From<&AlertEvent> for AlertLogRecord {
     fn from(alert: &AlertEvent) -> Self {
+        let alert_timestamp_ms = alert
+            .timestamp
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_millis())
+            .unwrap_or(0);
+
         Self {
             logged_at: Utc::now(),
+            alert_timestamp_ms,
             src_ip: alert.src_ip.to_string(),
             protocol: alert.protocol.as_str().to_string(),
             msg_type: alert.msg_type.as_str().to_string(),
@@ -172,15 +191,19 @@ mod tests {
     }
 
     #[test]
-    fn writes_alert_jsonl_with_hash() {
-        let dir = std::env::temp_dir().join(format!("warden-jsonl-alert-test-{}", std::process::id()));
+    fn writes_alert_jsonl_with_hash_and_alert_timestamp() {
+        let dir = std::env::temp_dir().join(format!(
+            "warden-jsonl-alert-test-{}",
+            std::process::id()
+        ));
         let _ = fs::remove_dir_all(&dir);
 
         let logger = JsonlLogger::new(JsonlLoggerConfig {
             log_dir: dir.clone(),
             alerts_file: "alerts.jsonl".to_string(),
             bans_file: "bans.jsonl".to_string(),
-        }).unwrap();
+        })
+        .unwrap();
 
         logger.log_alert(&test_alert(ip([192, 168, 10, 90]))).unwrap();
 
@@ -188,20 +211,25 @@ mod tests {
         assert!(contents.contains("\"action\":\"ALERT\""));
         assert!(contents.contains("192.168.10.90"));
         assert!(contents.contains("\"evidence_hash_hex\""));
+        assert!(contents.contains("\"alert_timestamp_ms\""));
 
         let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn writes_ban_jsonl_with_hash() {
-        let dir = std::env::temp_dir().join(format!("warden-jsonl-ban-test-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!(
+            "warden-jsonl-ban-test-{}",
+            std::process::id()
+        ));
         let _ = fs::remove_dir_all(&dir);
 
         let logger = JsonlLogger::new(JsonlLoggerConfig {
             log_dir: dir.clone(),
             alerts_file: "alerts.jsonl".to_string(),
             bans_file: "bans.jsonl".to_string(),
-        }).unwrap();
+        })
+        .unwrap();
 
         logger
             .log_ban(
