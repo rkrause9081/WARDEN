@@ -1,175 +1,392 @@
-function setText(id, value) {
-    const el = document.getElementById(id);
-    if (el) el.textContent = value;
+/*
+ * app.js
+ *
+ * Purpose:
+ *     Provides client-side dashboard behavior for WARDEN.
+ *
+ * Responsibilities:
+ *     - Poll live dashboard telemetry
+ *     - Render packet, alert, ban, blockchain, and timeline data
+ *     - Upload alerts.jsonl files for verification
+ *     - Display verification summaries and per-line results
+ *
+ * Non-Responsibilities:
+ *     - Running IDS detection
+ *     - Applying mitigation
+ *     - Anchoring blockchain evidence
+ *     - Recomputing verification hashes directly in the browser
+ *
+ * Architecture:
+ *
+ *      Axum /stats API
+ *              ↓
+ *         fetchDashboard()
+ *              ↓
+ *          renderState()
+ *              ↓
+ *        Browser Dashboard
+ */
+
+/* -------------------------------------------------------------------------- */
+/*                                  Constants                                 */
+/* -------------------------------------------------------------------------- */
+
+const REFRESH_INTERVAL_MS = 1000;
+
+/* -------------------------------------------------------------------------- */
+/*                              DOM Shortcuts                                 */
+/* -------------------------------------------------------------------------- */
+
+const $ = (id) => document.getElementById(id);
+
+/* -------------------------------------------------------------------------- */
+/*                             Render Helpers                                 */
+/* -------------------------------------------------------------------------- */
+
+function text(value, fallback = "—") {
+    if (value === null || value === undefined || value === "") {
+        return fallback;
+    }
+
+    return String(value);
+}
+
+function number(value) {
+    return Number(value || 0).toLocaleString();
+}
+
+function fixed(value, digits = 2) {
+    return Number(value || 0).toFixed(digits);
 }
 
 function shortHash(value) {
-    if (!value || value === 'N/A') return value || 'N/A';
-    return value.length > 22 ? `${value.slice(0, 12)}…${value.slice(-8)}` : value;
+    if (!value || value === "N/A") {
+        return "N/A";
+    }
+
+    if (value.length <= 22) {
+        return value;
+    }
+
+    return `${value.slice(0, 12)}…${value.slice(-8)}`;
 }
 
-function formatTime(value) {
-    if (!value) return '--:--:--';
-    const date = new Date(value);
-    return Number.isNaN(date.getTime()) ? value : date.toLocaleTimeString();
+function escapeHtml(value) {
+    return text(value, "")
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;")
+        .replaceAll("'", "&#039;");
 }
 
-function safeNumber(value) {
-    const n = Number(value || 0);
-    return Number.isFinite(n) ? n.toFixed(n % 1 === 0 ? 0 : 2) : '0';
+function emptyMessage(message) {
+    return `<div class="muted">${escapeHtml(message)}</div>`;
+}
+
+/* -------------------------------------------------------------------------- */
+/*                             Dashboard Fetching                             */
+/* -------------------------------------------------------------------------- */
+
+async function fetchDashboard() {
+    const response = await fetch("/stats", {
+        cache: "no-store",
+    });
+
+    if (!response.ok) {
+        throw new Error(`stats request failed: ${response.status}`);
+    }
+
+    return response.json();
+}
+
+async function refreshDashboard() {
+    try {
+        const state = await fetchDashboard();
+
+        renderState(state);
+        renderConnectionStatus(true, state);
+    } catch (error) {
+        console.error(error);
+        renderConnectionStatus(false);
+    }
+}
+
+/* -------------------------------------------------------------------------- */
+/*                              State Rendering                               */
+/* -------------------------------------------------------------------------- */
+
+function renderState(state) {
+    $("packets").textContent = number(state.packets_seen);
+    $("alerts").textContent = number(state.alerts_seen);
+    $("bans").textContent = number(state.bans_seen);
+    $("peak-pps").textContent = fixed(state.peak_pps);
+
+    $("mqtt-count").textContent = number(state.protocol_counts?.mqtt || state.mqtt_packets);
+    $("coap-count").textContent = number(state.protocol_counts?.coap || state.coap_packets);
+
+    renderTopTalkers(state.top_talkers || {});
+    renderAttackFeed(state.recent_alerts || []);
+    renderTimeline(state.timeline || []);
+    renderActiveBans(state.active_bans || {});
+    renderBlockchainEvents(state.blockchain_events || []);
+}
+
+function renderConnectionStatus(online, state = null) {
+    const pill = $("chain-status");
+
+    if (!pill) {
+        return;
+    }
+
+    if (!online) {
+        pill.textContent = "OFFLINE";
+        pill.className = "status-pill WARN";
+        return;
+    }
+
+    if (state?.dry_run === true) {
+        pill.textContent = "DRY RUN";
+        pill.className = "status-pill WARN";
+        return;
+    }
+
+    if (state?.dry_run === false) {
+        pill.textContent = "LIVE";
+        pill.className = "status-pill CRITICAL";
+        return;
+    }
+
+    pill.textContent = "LIVE";
+    pill.className = "status-pill INFO";
+}
+
+function renderTopTalkers(topTalkers) {
+    const rows = Object.entries(topTalkers)
+        .sort(([, left], [, right]) => Number(right) - Number(left))
+        .slice(0, 8)
+        .map(([ip, pps]) => {
+            return `
+                <div class="table-row">
+                    <span>${escapeHtml(ip)}</span>
+                    <strong>${fixed(pps)} PPS</strong>
+                </div>
+            `;
+        });
+
+    $("top-talkers").innerHTML = rows.length
+        ? rows.join("")
+        : emptyMessage("No traffic yet");
 }
 
 function renderAttackFeed(alerts) {
-    const el = document.getElementById('attack-feed');
-    const rows = (alerts || []).slice().reverse().slice(0, 12);
-    if (!rows.length) {
-        el.innerHTML = '<div class="muted">No alerts yet</div>';
-        return;
-    }
-
-    el.innerHTML = rows.map(alert => `
-        <div class="event-row">
-            <span>${formatTime(alert.timestamp)}</span>
-            <span class="badge ${alert.severity}">${alert.severity}</span>
-            <span>${alert.protocol} ${alert.msg_type} flood from <strong>${alert.src_ip}</strong> @ ${safeNumber(alert.pps)} PPS</span>
-            <span class="hash" title="${alert.evidence_hash || ''}">${shortHash(alert.evidence_hash)}</span>
-        </div>
-    `).join('');
-}
-
-function renderTimeline(events) {
-    const el = document.getElementById('timeline');
-    const rows = (events || []).slice().reverse().slice(0, 16);
-    if (!rows.length) {
-        el.innerHTML = '<div class="muted">Awaiting events</div>';
-        return;
-    }
-
-    el.innerHTML = rows.map(event => `
-        <div class="event-row">
-            <span>${formatTime(event.timestamp)}</span>
-            <span class="badge ${event.severity}">${event.stage}</span>
-            <span>${event.message}</span>
-            <span class="badge ${event.severity}">${event.severity}</span>
-        </div>
-    `).join('');
-}
-
-function renderTopTalkers(talkers) {
-    const el = document.getElementById('top-talkers');
-    const rows = Object.entries(talkers || {}).sort((a, b) => Number(b[1]) - Number(a[1])).slice(0, 10);
-    if (!rows.length) {
-        el.innerHTML = '<div class="muted">No traffic yet</div>';
-        return;
-    }
-
-    el.innerHTML = rows.map(([ip, pps]) => `
-        <div class="table-row"><span>${ip}</span><span class="badge INFO">${safeNumber(pps)} PPS</span></div>
-    `).join('');
-}
-
-function renderBans(bans) {
-    const el = document.getElementById('active-bans');
-    const rows = Object.values(bans || {}).slice(0, 10);
-    if (!rows.length) {
-        el.innerHTML = '<div class="muted">No bans active</div>';
-        return;
-    }
-
-    el.innerHTML = rows.map(ban => `
-        <div class="table-row">
-            <span><strong>${ban.src_ip}</strong> <span class="muted">${ban.protocol}</span></span>
-            <span class="badge CRITICAL">${ban.action || 'BAN'} · ${safeNumber(ban.remaining_seconds)}s</span>
-        </div>
-    `).join('');
-}
-
-function renderBlockchain(events) {
-    const el = document.getElementById('blockchain-events');
-    const rows = (events || []).slice().reverse().slice(0, 10);
-    if (!rows.length) {
-        el.innerHTML = '<div class="muted">No chain events yet</div>';
-        return;
-    }
-
-    el.innerHTML = rows.map(event => `
-        <div class="chain-row">
-            <span>${formatTime(event.timestamp)}</span>
-            <span class="tx" title="${event.tx_hash || ''}">TX ${shortHash(event.tx_hash)}</span>
-            <span class="hash" title="${event.evidence_hash || ''}">HASH ${shortHash(event.evidence_hash)}</span>
-            <span class="badge ${event.anchored ? 'Valid' : 'WARN'}">${event.status}</span>
-        </div>
-    `).join('');
-}
-
-async function refresh() {
-    try {
-        const res = await fetch('/stats', { cache: 'no-store' });
-        const data = await res.json();
-
-        setText('packets', data.packets_seen || 0);
-        setText('alerts', data.alerts_seen || 0);
-        setText('bans', data.bans_seen || 0);
-        setText('peak-pps', safeNumber(data.peak_pps || 0));
-        setText('mqtt-count', data.protocol_counts?.mqtt || 0);
-        setText('coap-count', data.protocol_counts?.coap || 0);
-        setText('chain-status', data.blockchain_events_seen > 0 ? 'CHAIN ACTIVE' : 'LIVE');
-
-        renderAttackFeed(data.recent_alerts);
-        renderTimeline(data.timeline);
-        renderTopTalkers(data.top_talkers);
-        renderBans(data.active_bans);
-        renderBlockchain(data.blockchain_events);
-    } catch (error) {
-        setText('chain-status', 'RECONNECTING');
-        console.error('Dashboard refresh failed:', error);
-    }
-}
-
-async function verifyFile() {
-    const input = document.getElementById('verify-file');
-    const status = document.getElementById('verify-status');
-    const results = document.getElementById('verify-results');
-
-    if (!input.files.length) {
-        status.textContent = 'Choose an alerts.jsonl file first.';
-        return;
-    }
-
-    const text = await input.files[0].text();
-    status.textContent = 'Verifying...';
-
-    try {
-        const res = await fetch('/api/verify', {
-            method: 'POST',
-            headers: { 'Content-Type': 'text/plain' },
-            body: text
+    const rows = alerts
+        .slice()
+        .reverse()
+        .map((alert) => {
+            return `
+                <div class="event-row">
+                    <span>${escapeHtml(alert.timestamp)}</span>
+                    <span class="badge ${escapeHtml(alert.severity)}">${escapeHtml(alert.severity)}</span>
+                    <span>
+                        ${escapeHtml(alert.protocol)}
+                        ${escapeHtml(alert.msg_type)}
+                        from ${escapeHtml(alert.src_ip)}
+                        at ${fixed(alert.pps)} PPS
+                    </span>
+                    <span class="hash" title="${escapeHtml(alert.evidence_hash)}">
+                        ${escapeHtml(shortHash(alert.evidence_hash))}
+                    </span>
+                </div>
+            `;
         });
 
-        if (!res.ok) {
-            status.textContent = 'Verification failed before parsing.';
-            return;
+    $("attack-feed").innerHTML = rows.length
+        ? rows.join("")
+        : emptyMessage("No alerts yet");
+}
+
+function renderTimeline(timeline) {
+    const rows = timeline
+        .slice()
+        .reverse()
+        .map((event) => {
+            return `
+                <div class="event-row">
+                    <span>${escapeHtml(event.timestamp)}</span>
+                    <span class="badge ${escapeHtml(event.severity)}">${escapeHtml(event.stage)}</span>
+                    <span>${escapeHtml(event.message)}</span>
+                    <span class="badge ${escapeHtml(event.severity)}">${escapeHtml(event.severity)}</span>
+                </div>
+            `;
+        });
+
+    $("timeline").innerHTML = rows.length
+        ? rows.join("")
+        : emptyMessage("Awaiting events");
+}
+
+function renderActiveBans(activeBans) {
+    const rows = Object.values(activeBans)
+        .sort((left, right) => left.src_ip.localeCompare(right.src_ip))
+        .map((ban) => {
+            return `
+                <div class="table-row">
+                    <span>
+                        ${escapeHtml(ban.src_ip)}
+                        · ${escapeHtml(ban.protocol)}
+                        · ${fixed(ban.pps)} PPS
+                    </span>
+                    <span class="badge ${ban.dry_run ? "WARN" : "CRITICAL"}">
+                        ${escapeHtml(ban.action)}
+                    </span>
+                </div>
+            `;
+        });
+
+    $("active-bans").innerHTML = rows.length
+        ? rows.join("")
+        : emptyMessage("No bans active");
+}
+
+function renderBlockchainEvents(events) {
+    const rows = events
+        .slice()
+        .reverse()
+        .map((event) => {
+            const statusClass = event.anchored ? "Valid" : "WARN";
+
+            return `
+                <div class="chain-row">
+                    <span>${escapeHtml(event.timestamp)}</span>
+                    <span class="tx" title="${escapeHtml(event.tx_hash)}">
+                        ${escapeHtml(shortHash(event.tx_hash))}
+                    </span>
+                    <span class="hash" title="${escapeHtml(event.evidence_hash)}">
+                        ${escapeHtml(shortHash(event.evidence_hash))}
+                    </span>
+                    <span class="badge ${statusClass}">
+                        ${escapeHtml(event.status)}
+                    </span>
+                </div>
+            `;
+        });
+
+    $("blockchain-events").innerHTML = rows.length
+        ? rows.join("")
+        : emptyMessage("No chain events yet");
+}
+
+/* -------------------------------------------------------------------------- */
+/*                            Verification Upload                             */
+/* -------------------------------------------------------------------------- */
+
+async function verifySelectedFile() {
+    const fileInput = $("verify-file");
+    const status = $("verify-status");
+    const results = $("verify-results");
+    const button = $("verify-button");
+
+    const file = fileInput?.files?.[0];
+
+    if (!file) {
+        status.textContent = "Select an alerts.jsonl file first.";
+        return;
+    }
+
+    button.disabled = true;
+    status.textContent = `Verifying ${file.name}...`;
+    results.innerHTML = "";
+
+    try {
+        const body = await file.text();
+
+        const response = await fetch("/api/verify", {
+            method: "POST",
+            headers: {
+                "Content-Type": "text/plain; charset=utf-8",
+            },
+            body,
+        });
+
+        if (!response.ok) {
+            throw new Error(`verification request failed: ${response.status}`);
         }
 
-        const data = await res.json();
-        const summary = data.summary;
-        status.textContent = `${summary.overall_status}: ${summary.valid} valid, ${summary.tampered} tampered, ${summary.missing_hash} missing hash, ${summary.parse_errors} parse errors`;
+        const verification = await response.json();
 
-        results.innerHTML = (data.results || []).slice(0, 40).map(row => `
-            <div class="verify-row">
-                <span>#${row.line_number}</span>
-                <span class="badge ${row.status}">${row.status}</span>
-                <span>${row.src_ip || 'N/A'} ${row.protocol || ''} ${row.msg_type || ''}</span>
-            </div>
-        `).join('');
+        renderVerification(verification);
 
-        refresh();
+        status.textContent = `Verification complete: ${verification.summary.overall_status}`;
     } catch (error) {
-        status.textContent = 'Verification request failed.';
         console.error(error);
+
+        status.textContent = "Verification failed. Check console output.";
+        results.innerHTML = emptyMessage(error.message);
+    } finally {
+        button.disabled = false;
     }
 }
 
-document.getElementById('verify-button').addEventListener('click', verifyFile);
-setInterval(refresh, 1000);
-refresh();
+function renderVerification(verification) {
+    const summary = verification.summary;
+    const results = verification.results || [];
+
+    const summaryRow = `
+        <div class="verify-row">
+            <span class="badge ${escapeHtml(summary.overall_status)}">
+                ${escapeHtml(summary.overall_status)}
+            </span>
+            <span>${number(summary.total)} lines</span>
+            <span>
+                ${number(summary.valid)} valid ·
+                ${number(summary.tampered)} tampered ·
+                ${number(summary.missing_hash)} missing hash ·
+                ${number(summary.parse_errors)} parse errors
+            </span>
+        </div>
+    `;
+
+    const resultRows = results.map((result) => {
+        return `
+            <div class="verify-row">
+                <span>#${number(result.line_number)}</span>
+                <span class="badge ${escapeHtml(result.status)}">
+                    ${escapeHtml(result.status)}
+                </span>
+                <span>
+                    ${escapeHtml(result.protocol)}
+                    ${escapeHtml(result.msg_type)}
+                    ${escapeHtml(result.src_ip)}
+                    <span class="hash" title="${escapeHtml(result.stored_hash)}">
+                        stored=${escapeHtml(shortHash(result.stored_hash))}
+                    </span>
+                    <span class="hash" title="${escapeHtml(result.recomputed_hash)}">
+                        recomputed=${escapeHtml(shortHash(result.recomputed_hash))}
+                    </span>
+                    ${result.error ? `· ${escapeHtml(result.error)}` : ""}
+                </span>
+            </div>
+        `;
+    });
+
+    $("verify-results").innerHTML = summaryRow + resultRows.join("");
+}
+
+/* -------------------------------------------------------------------------- */
+/*                                   Startup                                  */
+/* -------------------------------------------------------------------------- */
+
+function startDashboard() {
+    const verifyButton = $("verify-button");
+
+    if (verifyButton) {
+        verifyButton.addEventListener("click", verifySelectedFile);
+    }
+
+    refreshDashboard();
+
+    setInterval(refreshDashboard, REFRESH_INTERVAL_MS);
+}
+
+document.addEventListener("DOMContentLoaded", startDashboard);

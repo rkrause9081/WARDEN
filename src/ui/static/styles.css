@@ -1,19 +1,55 @@
+/*
+ * styles.css
+ *
+ * Purpose:
+ *     Provides the WARDEN SOC dashboard visual system.
+ *
+ * Responsibilities:
+ *     - Define the dashboard theme
+ *     - Layout telemetry cards
+ *     - Style feeds, tables, badges, hashes, and verification output
+ *     - Keep the UI readable across desktop and mobile screens
+ *
+ * Non-Responsibilities:
+ *     - Fetching telemetry
+ *     - Mutating dashboard state
+ *     - Running verification
+ *     - Performing IDS or mitigation logic
+ */
+
+/* -------------------------------------------------------------------------- */
+/*                              Theme Variables                               */
+/* -------------------------------------------------------------------------- */
+
 :root {
     --bg: #070b10;
     --panel: #0d1117;
     --panel-2: #101722;
+    --panel-3: #121c2a;
     --border: #203247;
+    --border-soft: rgba(255, 255, 255, 0.055);
+
     --text: #c8d8e8;
     --muted: #587086;
+
     --green: #00ff88;
     --pink: #ff3366;
     --yellow: #ffd166;
     --blue: #64b5ff;
+
+    --shadow: rgba(0, 0, 0, 0.28);
 }
 
-* { box-sizing: border-box; }
+/* -------------------------------------------------------------------------- */
+/*                                  Resets                                    */
+/* -------------------------------------------------------------------------- */
 
-html, body {
+* {
+    box-sizing: border-box;
+}
+
+html,
+body {
     min-height: 100%;
     overflow-x: hidden;
     overflow-y: auto;
@@ -21,16 +57,23 @@ html, body {
 
 body {
     margin: 0;
-    background: radial-gradient(circle at top left, #0b1b24 0, var(--bg) 34rem);
     color: var(--text);
+    background:
+        radial-gradient(circle at top left, #0b1b24 0, var(--bg) 34rem),
+        linear-gradient(180deg, #070b10 0%, #05080c 100%);
     font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
+
+/* -------------------------------------------------------------------------- */
+/*                                  Top Bar                                   */
+/* -------------------------------------------------------------------------- */
 
 .topbar {
     min-height: 76px;
     display: flex;
     align-items: center;
     justify-content: space-between;
+    gap: 18px;
     padding: 18px 26px;
     border-bottom: 1px solid var(--border);
     background: rgba(13, 17, 23, 0.96);
@@ -54,16 +97,23 @@ h1 span {
     margin-left: 8px;
 }
 
-p { margin: 8px 0 0; color: var(--muted); }
+p {
+    margin: 8px 0 0;
+    color: var(--muted);
+}
 
 .status-pill {
-    border: 1px solid rgba(0, 255, 136, .55);
+    border: 1px solid rgba(0, 255, 136, 0.55);
     color: var(--green);
     border-radius: 999px;
     padding: 8px 14px;
-    box-shadow: 0 0 24px rgba(0, 255, 136, .08);
+    box-shadow: 0 0 24px rgba(0, 255, 136, 0.08);
     white-space: nowrap;
 }
+
+/* -------------------------------------------------------------------------- */
+/*                                  Layout                                    */
+/* -------------------------------------------------------------------------- */
 
 .layout {
     padding: 24px;
@@ -72,25 +122,49 @@ p { margin: 8px 0 0; color: var(--muted); }
     gap: 16px;
 }
 
-.card, .metric-card {
-    background: linear-gradient(180deg, rgba(16, 23, 34, .94), rgba(10, 14, 20, .94));
+.card,
+.metric-card {
+    min-width: 0;
+    padding: 18px;
     border: 1px solid var(--border);
     border-radius: 10px;
-    padding: 18px;
-    box-shadow: 0 10px 32px rgba(0, 0, 0, .24);
-    min-width: 0;
+    background:
+        linear-gradient(180deg, rgba(16, 23, 34, 0.94), rgba(10, 14, 20, 0.94));
+    box-shadow: 0 10px 32px var(--shadow);
 }
 
-.metric-card { min-height: 102px; }
+.card:hover,
+.metric-card:hover {
+    border-color: rgba(0, 255, 136, 0.20);
+}
 
-.label, .card-title {
+.metric-card {
+    min-height: 102px;
+}
+
+.wide {
+    grid-column: span 2;
+}
+
+.full {
+    grid-column: 1 / -1;
+}
+
+/* -------------------------------------------------------------------------- */
+/*                                Typography                                  */
+/* -------------------------------------------------------------------------- */
+
+.label,
+.card-title {
     color: var(--muted);
     font-size: 12px;
     letter-spacing: 3px;
     text-transform: uppercase;
 }
 
-.card-title { margin-bottom: 14px; }
+.card-title {
+    margin-bottom: 14px;
+}
 
 .value {
     font-size: 34px;
@@ -99,10 +173,21 @@ p { margin: 8px 0 0; color: var(--muted); }
     font-weight: 800;
 }
 
-.danger { color: var(--pink); }
-.danger-card { border-color: rgba(255, 51, 102, .32); }
-.wide { grid-column: span 2; }
-.full { grid-column: 1 / -1; }
+.danger {
+    color: var(--pink);
+}
+
+.danger-card {
+    border-color: rgba(255, 51, 102, 0.32);
+}
+
+.muted {
+    color: var(--muted);
+}
+
+/* -------------------------------------------------------------------------- */
+/*                              Protocol Cards                                */
+/* -------------------------------------------------------------------------- */
 
 .protocol-grid {
     display: grid;
@@ -112,9 +197,9 @@ p { margin: 8px 0 0; color: var(--muted); }
 
 .mini-stat {
     padding: 14px;
-    border: 1px solid rgba(255, 255, 255, .06);
+    border: 1px solid var(--border-soft);
     border-radius: 8px;
-    background: rgba(255, 255, 255, .025);
+    background: rgba(255, 255, 255, 0.025);
 }
 
 .mini-stat span {
@@ -130,44 +215,103 @@ p { margin: 8px 0 0; color: var(--muted); }
     font-size: 26px;
 }
 
-.feed, .timeline, .table, .chain-grid, .verify-results {
+/* -------------------------------------------------------------------------- */
+/*                            Feeds And Tables                                */
+/* -------------------------------------------------------------------------- */
+
+.feed,
+.timeline,
+.table,
+.chain-grid,
+.verify-results {
     display: grid;
     gap: 10px;
 }
 
-.event-row, .table-row, .chain-row, .verify-row {
-    display: grid;
-    grid-template-columns: 120px 110px minmax(0, 1fr) auto;
-    gap: 12px;
-    align-items: center;
-    padding: 11px 12px;
-    background: rgba(255, 255, 255, .025);
-    border: 1px solid rgba(255, 255, 255, .045);
-    border-radius: 8px;
+.event-row,
+.table-row,
+.chain-row,
+.verify-row {
     min-width: 0;
+    display: grid;
+    align-items: center;
+    gap: 12px;
+    padding: 11px 12px;
+    border: 1px solid var(--border-soft);
+    border-radius: 8px;
+    background: rgba(255, 255, 255, 0.025);
 }
 
-.table-row { grid-template-columns: minmax(0, 1fr) auto; }
-.chain-row { grid-template-columns: 120px minmax(0, 1fr) minmax(0, 1fr) auto; }
-.verify-row { grid-template-columns: 80px 120px minmax(0, 1fr); }
+.event-row {
+    grid-template-columns: 120px 110px minmax(0, 1fr) auto;
+}
+
+.table-row {
+    grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.chain-row {
+    grid-template-columns: 120px minmax(0, 1fr) minmax(0, 1fr) auto;
+}
+
+.verify-row {
+    grid-template-columns: 80px 120px minmax(0, 1fr);
+}
+
+.event-row:hover,
+.table-row:hover,
+.chain-row:hover,
+.verify-row:hover {
+    background: rgba(255, 255, 255, 0.04);
+}
+
+/* -------------------------------------------------------------------------- */
+/*                                  Badges                                    */
+/* -------------------------------------------------------------------------- */
 
 .badge {
+    width: fit-content;
+    white-space: nowrap;
     border-radius: 999px;
     padding: 4px 9px;
     font-size: 11px;
     border: 1px solid var(--border);
     color: var(--text);
-    white-space: nowrap;
-    width: fit-content;
 }
 
-.INFO { color: var(--blue); border-color: rgba(100, 181, 255, .35); }
-.WARN { color: var(--yellow); border-color: rgba(255, 209, 102, .45); }
-.CRITICAL, .Tampered, .ParseError { color: var(--pink); border-color: rgba(255, 51, 102, .45); }
-.Valid { color: var(--green); border-color: rgba(0, 255, 136, .45); }
-.MissingHash { color: var(--yellow); border-color: rgba(255, 209, 102, .45); }
+.INFO {
+    color: var(--blue);
+    border-color: rgba(100, 181, 255, 0.35);
+}
 
-.hash, .tx {
+.WARN {
+    color: var(--yellow);
+    border-color: rgba(255, 209, 102, 0.45);
+}
+
+.CRITICAL,
+.Tampered,
+.ParseError {
+    color: var(--pink);
+    border-color: rgba(255, 51, 102, 0.45);
+}
+
+.Valid {
+    color: var(--green);
+    border-color: rgba(0, 255, 136, 0.45);
+}
+
+.MissingHash {
+    color: var(--yellow);
+    border-color: rgba(255, 209, 102, 0.45);
+}
+
+/* -------------------------------------------------------------------------- */
+/*                            Hash / Transaction Text                         */
+/* -------------------------------------------------------------------------- */
+
+.hash,
+.tx {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -175,7 +319,9 @@ p { margin: 8px 0 0; color: var(--muted); }
     min-width: 0;
 }
 
-.muted { color: var(--muted); }
+/* -------------------------------------------------------------------------- */
+/*                           Verification Panel                               */
+/* -------------------------------------------------------------------------- */
 
 .verify-panel {
     display: flex;
@@ -190,7 +336,7 @@ input[type="file"] {
     border: 1px dashed var(--border);
     padding: 10px;
     border-radius: 8px;
-    background: rgba(255, 255, 255, .025);
+    background: rgba(255, 255, 255, 0.025);
 }
 
 button {
@@ -203,17 +349,55 @@ button {
     cursor: pointer;
 }
 
-button:hover { filter: brightness(1.08); }
+button:hover {
+    filter: brightness(1.08);
+}
+
+button:disabled {
+    cursor: not-allowed;
+    opacity: 0.55;
+}
+
+/* -------------------------------------------------------------------------- */
+/*                                Responsive                                  */
+/* -------------------------------------------------------------------------- */
 
 @media (max-width: 1200px) {
-    .layout { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-    .wide { grid-column: span 2; }
+    .layout {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .wide {
+        grid-column: span 2;
+    }
 }
 
 @media (max-width: 700px) {
-    .layout { grid-template-columns: 1fr; padding: 14px; }
-    .wide, .full { grid-column: span 1; }
-    .event-row, .chain-row, .verify-row, .table-row { grid-template-columns: 1fr; }
-    .topbar { align-items: flex-start; flex-direction: column; gap: 12px; }
-    h1 span { display: block; margin: 8px 0 0; }
+    .layout {
+        grid-template-columns: 1fr;
+        padding: 14px;
+    }
+
+    .wide,
+    .full {
+        grid-column: span 1;
+    }
+
+    .event-row,
+    .chain-row,
+    .verify-row,
+    .table-row {
+        grid-template-columns: 1fr;
+    }
+
+    .topbar {
+        align-items: flex-start;
+        flex-direction: column;
+        gap: 12px;
+    }
+
+    h1 span {
+        display: block;
+        margin: 8px 0 0;
+    }
 }
