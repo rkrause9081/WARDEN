@@ -1,40 +1,97 @@
-//! JSONL evidence verifier.
-//!
-//! This verifies whether local alert log records still match their stored evidence hashes.
-//! It does not require blockchain access yet.
-//!
-//! Verification levels:
-//! - VALID: local record recomputes to the stored evidence hash
-//! - TAMPERED: local record recomputes to a different hash
-//! - MISSING_HASH: log record has no evidence_hash_hex field
-//! - PARSE_ERROR: log line could not be decoded
-//!
-//! Note:
-//! New alert records include `alert_timestamp_ms` because the active evidence
-//! hash includes the original alert timestamp. Older records without that field
-//! are verified against the legacy no-timestamp hash for backward compatibility.
+/*
+ * verifier.rs
+ *
+ * Purpose:
+ *     Verifies WARDEN JSONL alert evidence against stored hashes.
+ *
+ * Responsibilities:
+ *     - Read alert JSONL files
+ *     - Parse individual alert records
+ *     - Recompute expected evidence hashes
+ *     - Detect tampering, missing hashes, and parse failures
+ *     - Print CLI verification reports
+ *
+ * Non-Responsibilities:
+ *     - Blockchain verification
+ *     - Packet inspection
+ *     - Evidence hash creation during IDS runtime
+ *     - Dashboard rendering
+ *
+ * Architecture:
+ *
+ *      alerts.jsonl
+ *          ↓
+ *      AlertEvidenceRecord
+ *          ↓
+ *      Hash Recompute
+ *          ↓
+ *      Stored Hash Comparison
+ *          ↓
+ *      VerificationResult
+ *
+ * Verification Levels:
+ *     - VALID: stored hash matches recomputed hash
+ *     - TAMPERED: stored hash differs from recomputed hash
+ *     - MISSING_HASH: record has no stored evidence hash
+ *     - PARSE_ERROR: JSONL row could not be decoded
+ */
 
 use std::fs::File;
-use std::io::{BufRead, BufReader};
+use std::io::{
+    BufRead,
+    BufReader,
+};
 use std::path::Path;
 
 use serde::Deserialize;
 
 use crate::verify::hash::{
-    compute_canonical_alert_hash, compute_legacy_alert_hash, hash_to_hex, normalize_hex,
+    compute_canonical_alert_hash,
+    compute_legacy_alert_hash,
+    hash_to_hex,
+    normalize_hex,
 };
 
+/* -------------------------------------------------------------------------- */
+/*                           Alert Evidence Record                            */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * JSONL alert record used by the verifier.
+ *
+ * New records include `alert_timestamp_ms`.
+ * Older records may omit it and are verified using legacy hashing.
+ */
 #[derive(Debug, Clone, Deserialize)]
 pub struct AlertEvidenceRecord {
+    /// Logger write timestamp.
     pub logged_at: Option<String>,
+
+    /// Original alert timestamp used in canonical hash generation.
     pub alert_timestamp_ms: Option<u128>,
+
+    /// Alert source IP.
     pub src_ip: String,
+
+    /// Alert protocol.
     pub protocol: String,
+
+    /// Alert message type.
     pub msg_type: String,
+
+    /// Alert packets-per-second value.
     pub pps: f64,
+
+    /// Stored evidence hash from the JSONL record.
     pub evidence_hash_hex: Option<String>,
+
+    /// Optional log action, usually ALERT.
     pub action: Option<String>,
 }
+
+/* -------------------------------------------------------------------------- */
+/*                           Verification Status                              */
+/* -------------------------------------------------------------------------- */
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VerificationStatus {
@@ -43,6 +100,10 @@ pub enum VerificationStatus {
     MissingHash,
     ParseError,
 }
+
+/* -------------------------------------------------------------------------- */
+/*                           Verification Result                              */
+/* -------------------------------------------------------------------------- */
 
 #[derive(Debug, Clone)]
 pub struct VerificationResult {
@@ -56,6 +117,13 @@ pub struct VerificationResult {
     pub error: Option<String>,
 }
 
+/* -------------------------------------------------------------------------- */
+/*                              File Verification                             */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Verifies every non-empty line in an alert JSONL file.
+ */
 pub fn verify_alert_log_file(
     path: impl AsRef<Path>,
 ) -> Result<Vec<VerificationResult>, std::io::Error> {
@@ -72,39 +140,56 @@ pub fn verify_alert_log_file(
             continue;
         }
 
-        results.push(verify_alert_log_line(line_number, &line));
+        results.push(
+            verify_alert_log_line(line_number, &line)
+        );
     }
 
     Ok(results)
 }
 
-pub fn verify_alert_log_line(line_number: usize, line: &str) -> VerificationResult {
-    let record = match serde_json::from_str::<AlertEvidenceRecord>(line) {
-        Ok(record) => record,
-        Err(error) => {
-            return VerificationResult {
-                line_number,
-                status: VerificationStatus::ParseError,
-                src_ip: None,
-                protocol: None,
-                msg_type: None,
-                stored_hash: None,
-                recomputed_hash: None,
-                error: Some(error.to_string()),
-            };
-        }
-    };
+/* -------------------------------------------------------------------------- */
+/*                              Line Verification                             */
+/* -------------------------------------------------------------------------- */
 
-    let Some(stored_hash_raw) = record.evidence_hash_hex.clone() else {
-        let recomputed_hash = record.alert_timestamp_ms.map(|alert_timestamp_ms| {
-            hash_to_hex(compute_canonical_alert_hash(
-                &record.src_ip,
-                &record.protocol,
-                &record.msg_type,
-                record.pps,
-                alert_timestamp_ms,
-            ))
-        });
+/**
+ * Verifies one JSONL alert record.
+ */
+pub fn verify_alert_log_line(
+    line_number: usize,
+    line: &str,
+) -> VerificationResult {
+    let record =
+        match serde_json::from_str::<AlertEvidenceRecord>(line) {
+            Ok(record) => record,
+
+            Err(error) => {
+                return VerificationResult {
+                    line_number,
+                    status: VerificationStatus::ParseError,
+                    src_ip: None,
+                    protocol: None,
+                    msg_type: None,
+                    stored_hash: None,
+                    recomputed_hash: None,
+                    error: Some(error.to_string()),
+                };
+            }
+        };
+
+    let Some(stored_hash_raw) =
+        record.evidence_hash_hex.clone()
+    else {
+        let recomputed_hash =
+            record.alert_timestamp_ms.map(|alert_timestamp_ms| {
+                hash_to_hex(compute_canonical_alert_hash(
+                    &record.src_ip,
+                    &record.protocol,
+                    &record.msg_type,
+                    record.pps,
+                    alert_timestamp_ms,
+                ))
+            });
 
         return VerificationResult {
             line_number,
@@ -121,19 +206,24 @@ pub fn verify_alert_log_line(line_number: usize, line: &str) -> VerificationResu
     let stored_hash = normalize_hex(&stored_hash_raw);
 
     let recomputed_hash = match record.alert_timestamp_ms {
-        Some(alert_timestamp_ms) => hash_to_hex(compute_canonical_alert_hash(
-            &record.src_ip,
-            &record.protocol,
-            &record.msg_type,
-            record.pps,
-            alert_timestamp_ms,
-        )),
-        None => hash_to_hex(compute_legacy_alert_hash(
-            &record.src_ip,
-            &record.protocol,
-            &record.msg_type,
-            record.pps,
-        )),
+        Some(alert_timestamp_ms) => {
+            hash_to_hex(compute_canonical_alert_hash(
+                &record.src_ip,
+                &record.protocol,
+                &record.msg_type,
+                record.pps,
+                alert_timestamp_ms,
+            ))
+        }
+
+        None => {
+            hash_to_hex(compute_legacy_alert_hash(
+                &record.src_ip,
+                &record.protocol,
+                &record.msg_type,
+                record.pps,
+            ))
+        }
     };
 
     let status = if stored_hash == recomputed_hash {
@@ -154,7 +244,16 @@ pub fn verify_alert_log_line(line_number: usize, line: &str) -> VerificationResu
     }
 }
 
-pub fn print_verification_report(results: &[VerificationResult]) {
+/* -------------------------------------------------------------------------- */
+/*                              Report Printing                               */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Prints a human-readable verification report.
+ */
+pub fn print_verification_report(
+    results: &[VerificationResult],
+) {
     let mut valid = 0usize;
     let mut tampered = 0usize;
     let mut missing = 0usize;
@@ -210,6 +309,10 @@ pub fn print_verification_report(results: &[VerificationResult]) {
     println!("Parse errors: {parse_errors}");
 }
 
+/* -------------------------------------------------------------------------- */
+/*                                   Tests                                    */
+/* -------------------------------------------------------------------------- */
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -220,7 +323,10 @@ mod tests {
 
         let result = verify_alert_log_line(1, line);
 
-        assert_eq!(result.status, VerificationStatus::Valid);
+        assert_eq!(
+            result.status,
+            VerificationStatus::Valid
+        );
     }
 
     #[test]
@@ -229,7 +335,10 @@ mod tests {
 
         let result = verify_alert_log_line(1, line);
 
-        assert_eq!(result.status, VerificationStatus::Valid);
+        assert_eq!(
+            result.status,
+            VerificationStatus::Valid
+        );
     }
 
     #[test]
@@ -238,7 +347,10 @@ mod tests {
 
         let result = verify_alert_log_line(1, line);
 
-        assert_eq!(result.status, VerificationStatus::Tampered);
+        assert_eq!(
+            result.status,
+            VerificationStatus::Tampered
+        );
     }
 
     #[test]
@@ -247,6 +359,9 @@ mod tests {
 
         let result = verify_alert_log_line(1, line);
 
-        assert_eq!(result.status, VerificationStatus::MissingHash);
+        assert_eq!(
+            result.status,
+            VerificationStatus::MissingHash
+        );
     }
 }

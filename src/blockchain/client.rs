@@ -1,23 +1,41 @@
-//! ethers-rs client for WardenEvidence.sol.
-//!
-//! Designed for local Hardhat first.
-//!
-//! Required Cargo dependencies:
-//!
-//! ```toml
-//! ethers = "2"
-//! tokio = { version = "1", features = ["full"] }
-//! hex = "0.4"
-//! ```
-//!
-//! Environment variables:
-//!
-//! ```text
-//! WARDEN_RPC_URL=http://127.0.0.1:8545
-//! WARDEN_PRIVATE_KEY=<hardhat account private key>
-//! WARDEN_EVIDENCE_ADDRESS=<deployed WardenEvidence address>
-//! WARDEN_CHAIN_ID=31337
-//! ```
+/*
+ * client.rs
+ *
+ * Purpose:
+ *     Provides Ethereum blockchain integration for WARDEN.
+ *
+ * Responsibilities:
+ *     - Load blockchain configuration
+ *     - Connect to Ethereum/Hardhat RPC nodes
+ *     - Initialize smart contract clients
+ *     - Submit forensic evidence transactions
+ *     - Encode blockchain-compatible evidence payloads
+ *
+ * Non-Responsibilities:
+ *     - IDS traffic inspection
+ *     - Attack detection
+ *     - Evidence hashing
+ *     - Smart contract deployment
+ *     - Dashboard visualization
+ *
+ * Architecture:
+ *
+ *      WARDEN IDS
+ *            ↓
+ *      ChainAlert
+ *            ↓
+ *      BlockchainClient
+ *            ↓
+ *      ethers-rs
+ *            ↓
+ *      WardenEvidence.sol
+ *            ↓
+ *      Ethereum / Hardhat
+ */
+
+/* -------------------------------------------------------------------------- */
+/*                                 Imports                                    */
+/* -------------------------------------------------------------------------- */
 
 use std::env;
 use std::sync::Arc;
@@ -33,6 +51,14 @@ use ethers::utils::hex;
 
 use crate::blockchain::types::ChainAlert;
 
+/* -------------------------------------------------------------------------- */
+/*                               Contract ABI                                 */
+/* -------------------------------------------------------------------------- */
+
+/// Minimal ABI required for WardenEvidence interaction.
+///
+/// Only the `logAttack` method is required by WARDEN
+/// during forensic evidence anchoring.
 const WARDEN_EVIDENCE_ABI: &str = r#"
 [
   {
@@ -54,16 +80,48 @@ const WARDEN_EVIDENCE_ABI: &str = r#"
 ]
 "#;
 
+/* -------------------------------------------------------------------------- */
+/*                           Blockchain Configuration                         */
+/* -------------------------------------------------------------------------- */
+
+/// Runtime blockchain configuration.
+///
+/// Loaded primarily from environment variables
+/// to simplify deployment flexibility.
 #[derive(Debug, Clone)]
 pub struct BlockchainConfig {
+    /// Ethereum RPC endpoint.
     pub rpc_url: String,
+
+    /// Signer private key.
     pub private_key: String,
+
+    /// Deployed WardenEvidence contract address.
     pub evidence_contract: Address,
+
+    /// Blockchain chain ID.
     pub chain_id: u64,
+
+    /// Enables/disables blockchain logging.
     pub enabled: bool,
 }
 
+/* -------------------------------------------------------------------------- */
+/*                      BlockchainConfig Implementation                       */
+/* -------------------------------------------------------------------------- */
+
 impl BlockchainConfig {
+    /**
+     * Builds blockchain configuration from environment variables.
+     *
+     * Expected environment variables:
+     *
+     * - WARDEN_BLOCKCHAIN_ENABLED
+     * - WARDEN_RPC_URL
+     * - WARDEN_PRIVATE_KEY
+     * - WARDEN_EVIDENCE_ADDRESS
+     * - WARDEN_CHAIN_ID
+     */
     pub fn from_env() -> Result<Self, String> {
         let enabled = env::var("WARDEN_BLOCKCHAIN_ENABLED")
             .unwrap_or_else(|_| "false".to_string())
@@ -80,12 +138,16 @@ impl BlockchainConfig {
 
         let evidence_contract = evidence_contract_raw
             .parse::<Address>()
-            .map_err(|error| format!("invalid WARDEN_EVIDENCE_ADDRESS: {error}"))?;
+            .map_err(|error| {
+                format!("invalid WARDEN_EVIDENCE_ADDRESS: {error}")
+            })?;
 
         let chain_id = env::var("WARDEN_CHAIN_ID")
             .unwrap_or_else(|_| "31337".to_string())
             .parse::<u64>()
-            .map_err(|error| format!("invalid WARDEN_CHAIN_ID: {error}"))?;
+            .map_err(|error| {
+                format!("invalid WARDEN_CHAIN_ID: {error}")
+            })?;
 
         Ok(Self {
             rpc_url,
@@ -97,30 +159,71 @@ impl BlockchainConfig {
     }
 }
 
+/* -------------------------------------------------------------------------- */
+/*                              Blockchain Client                             */
+/* -------------------------------------------------------------------------- */
+
+/// Ethereum blockchain client used for forensic anchoring.
+///
+/// Wraps:
+/// - provider initialization
+/// - signer middleware
+/// - smart contract interaction
+/// - transaction submission
 #[derive(Clone)]
 pub struct BlockchainClient {
+    /// ethers-rs smart contract wrapper.
     contract: Contract<SignerMiddleware<Provider<Http>, LocalWallet>>,
+
+    /// Whether blockchain integration is enabled.
     enabled: bool,
 }
 
+/* -------------------------------------------------------------------------- */
+/*                     BlockchainClient Implementation                        */
+/* -------------------------------------------------------------------------- */
+
 impl BlockchainClient {
-    pub async fn from_config(config: BlockchainConfig) -> Result<Self, String> {
+    /**
+     * Creates a blockchain client from runtime configuration.
+     *
+     * Initializes:
+     * - RPC provider
+     * - wallet signer
+     * - contract ABI
+     * - contract instance
+     */
+    pub async fn from_config(
+        config: BlockchainConfig
+    ) -> Result<Self, String> {
         let provider = Provider::<Http>::try_from(config.rpc_url.as_str())
-            .map_err(|error| format!("failed to create provider: {error}"))?
+            .map_err(|error| {
+                format!("failed to create provider: {error}")
+            })?
             .interval(Duration::from_millis(10));
 
         let wallet = config
             .private_key
             .parse::<LocalWallet>()
-            .map_err(|error| format!("failed to parse private key: {error}"))?
+            .map_err(|error| {
+                format!("failed to parse private key: {error}")
+            })?
             .with_chain_id(config.chain_id);
 
-        let client = Arc::new(SignerMiddleware::new(provider, wallet));
+        let client = Arc::new(
+            SignerMiddleware::new(provider, wallet)
+        );
 
         let abi: Abi = serde_json::from_str(WARDEN_EVIDENCE_ABI)
-            .map_err(|error| format!("failed to parse ABI: {error}"))?;
+            .map_err(|error| {
+                format!("failed to parse ABI: {error}")
+            })?;
 
-        let contract = Contract::new(config.evidence_contract, abi, client);
+        let contract = Contract::new(
+            config.evidence_contract,
+            abi,
+            client,
+        );
 
         Ok(Self {
             contract,
@@ -128,22 +231,50 @@ impl BlockchainClient {
         })
     }
 
+    /**
+     * Creates a blockchain client using environment variables.
+     */
     pub async fn from_env() -> Result<Self, String> {
         let config = BlockchainConfig::from_env()?;
         Self::from_config(config).await
     }
 
+    /**
+     * Returns whether blockchain integration is enabled.
+     */
     pub fn is_enabled(&self) -> bool {
         self.enabled
     }
 
+    /**
+     * Returns the connected registry contract address.
+     */
     pub fn registry_address(&self) -> String {
         format!("{:?}", self.contract.address())
     }
 
-    pub async fn log_attack(&self, alert: ChainAlert) -> Result<H256, String> {
+    /**
+     * Anchors attack evidence on-chain.
+     *
+     * Converts IDS evidence into a Solidity-compatible
+     * transaction payload and submits it to the registry.
+     *
+     * # Arguments
+     *
+     * * `alert` - Blockchain-compatible forensic alert
+     *
+     * # Returns
+     *
+     * Ethereum transaction hash on success.
+     */
+    pub async fn log_attack(
+        &self,
+        alert: ChainAlert
+    ) -> Result<H256, String> {
         if !self.enabled {
-            return Err("blockchain logging is disabled".to_string());
+            return Err(
+                "blockchain logging is disabled".to_string()
+            );
         }
 
         let evidence_hash = H256::from(alert.evidence_hash);
@@ -161,18 +292,29 @@ impl BlockchainClient {
                     alert.mitigated,
                 ),
             )
-            .map_err(|error| format!("failed to build logAttack call: {error}"))?;
+            .map_err(|error| {
+                format!("failed to build logAttack call: {error}")
+            })?;
 
         let pending_tx = call
             .send()
             .await
-            .map_err(|error| format!("failed to send logAttack tx: {error}"))?;
+            .map_err(|error| {
+                format!("failed to send logAttack tx: {error}")
+            })?;
 
         let tx_hash = pending_tx.tx_hash();
 
         Ok(tx_hash)
     }
 
+    /**
+     * Converts a raw SHA-256 hash into hexadecimal format.
+     *
+     * # Arguments
+     *
+     * * `hash` - 32-byte SHA-256 hash
+     */
     pub fn hash_hex(hash: [u8; 32]) -> String {
         format!("0x{}", hex::encode(hash))
     }

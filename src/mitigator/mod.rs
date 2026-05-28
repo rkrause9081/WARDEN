@@ -1,8 +1,45 @@
-//! Mitigation module.
-//!
-//! Receives alert events from the engine and blocks offending IPs.
-//! The default backend shells out to `iptables`, matching the Python project.
+/*
+ * mod.rs
+ *
+ * Purpose:
+ *     Defines the WARDEN mitigation subsystem.
+ *
+ * Responsibilities:
+ *     - Expose mitigation backends
+ *     - Centralize mitigation exports
+ *     - Provide ban/unban interfaces
+ *
+ * Non-Responsibilities:
+ *     - IDS packet inspection
+ *     - Blockchain anchoring
+ *     - Evidence hashing
+ *     - Dashboard visualization
+ *
+ * Architecture:
+ *
+ *      AlertEvent
+ *            ↓
+ *      Mitigation Module
+ *         └── iptables.rs
+ *            ↓
+ *      Firewall Enforcement
+ *            ↓
+ *      Active Ban Tracking
+ */
+
+/* -------------------------------------------------------------------------- */
+/*                               Module Imports                               */
+/* -------------------------------------------------------------------------- */
 
 pub mod iptables;
 
-pub use iptables::{BanRecord, Mitigator, MitigatorConfig, MitigatorStats};
+/* -------------------------------------------------------------------------- */
+/*                              Public Re-Exports                             */
+/* -------------------------------------------------------------------------- */
+
+pub use iptables::{
+    BanRecord,
+    Mitigator,
+    MitigatorConfig,
+    MitigatorStats,
+};

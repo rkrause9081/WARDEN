@@ -1,19 +1,62 @@
-//! Runtime pipeline for The Warden.
-//!
-//! Sniffer -> Engine -> JSONL -> Mitigator -> optional blockchain anchoring -> Dashboard telemetry
+/*
+ * pipeline.rs
+ *
+ * Purpose:
+ *     Runs the live WARDEN IDS pipeline.
+ *
+ * Responsibilities:
+ *     - Connect sniffer output to the detection engine
+ *     - Forward alerts to mitigation
+ *     - Write JSONL forensic logs
+ *     - Optionally anchor evidence on-chain
+ *     - Update dashboard telemetry
+ *
+ * Non-Responsibilities:
+ *     - Parsing configuration files
+ *     - Defining packet/alert types
+ *     - Serving dashboard routes
+ *     - Implementing detection algorithms
+ *
+ * Architecture:
+ *
+ *      Sniffer
+ *        ↓
+ *      Packet Channel
+ *        ↓
+ *      Engine Thread
+ *        ↓
+ *      Alert Channel
+ *        ↓
+ *      Mitigator Thread
+ *        ↓
+ *      JSONL / Blockchain / Dashboard
+ */
 
 use std::sync::mpsc;
 use std::thread;
 
-use crate::blockchain::{BlockchainClient, ChainAlert};
+use crate::blockchain::{
+    BlockchainClient,
+    ChainAlert,
+};
 use crate::engine::Engine;
 use crate::evidence::compute_alert_evidence_hash;
 use crate::logging::JsonlLogger;
 use crate::mitigator::Mitigator;
 use crate::sniffer::Sniffer;
-use crate::types::{AlertEvent, PacketRecord};
+use crate::types::{
+    AlertEvent,
+    PacketRecord,
+};
 use crate::ui::SharedDashboardState;
 
+/* -------------------------------------------------------------------------- */
+/*                              Live Pipeline                                 */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Starts the live packet-processing pipeline.
+ */
 pub fn run_live_pipeline(
     interface: impl Into<String>,
     mut engine: Engine,
@@ -29,6 +72,10 @@ pub fn run_live_pipeline(
 
     let engine_dashboard = dashboard_state.clone();
     let engine_logger = logger.clone();
+
+    /* ---------------------------------------------------------------------- */
+    /*                              Engine Thread                             */
+    /* ---------------------------------------------------------------------- */
 
     let engine_handle = thread::spawn(move || {
         println!("Engine thread started.");
@@ -47,7 +94,9 @@ pub fn run_live_pipeline(
             let protocol = record.protocol.clone();
 
             if let Some(mut alert) = engine.ingest(record) {
-                let evidence_hash = compute_alert_evidence_hash(&alert);
+                let evidence_hash =
+                    compute_alert_evidence_hash(&alert);
+
                 alert.evidence_hash = Some(evidence_hash);
 
                 println!(
@@ -90,6 +139,10 @@ pub fn run_live_pipeline(
 
     let mitigator_dashboard = dashboard_state.clone();
     let mitigator_logger = logger.clone();
+
+    /* ---------------------------------------------------------------------- */
+    /*                            Mitigator Thread                            */
+    /* ---------------------------------------------------------------------- */
 
     let mitigator_handle = thread::spawn(move || {
         println!("Mitigator thread started.");
@@ -139,13 +192,19 @@ pub fn run_live_pipeline(
 
             if let Some(client) = &blockchain_client {
                 if client.is_enabled() {
-                    if let Some(chain_alert) = ChainAlert::from_alert(&alert, mitigated) {
-                        let tx_result = runtime.block_on(client.log_attack(chain_alert));
+                    if let Some(chain_alert) =
+                        ChainAlert::from_alert(&alert, mitigated)
+                    {
+                        let tx_result =
+                            runtime.block_on(client.log_attack(chain_alert));
 
                         match tx_result {
                             Ok(tx_hash) => {
                                 let tx_hash_string = format!("{:?}", tx_hash);
-                                println!("CHAIN: attack evidence anchored in tx {tx_hash_string}");
+
+                                println!(
+                                    "CHAIN: attack evidence anchored in tx {tx_hash_string}"
+                                );
 
                                 if let Some(state) = &mitigator_dashboard {
                                     if let Ok(mut state) = state.lock() {
@@ -160,6 +219,7 @@ pub fn run_live_pipeline(
                                     }
                                 }
                             }
+
                             Err(error) => {
                                 eprintln!("Blockchain logging failed: {error}");
 
@@ -180,18 +240,28 @@ pub fn run_live_pipeline(
         }
 
         mitigator.stop();
+
         println!("Mitigator thread stopped.");
     });
 
+    /* ---------------------------------------------------------------------- */
+    /*                             Sniffer Loop                               */
+    /* ---------------------------------------------------------------------- */
+
     let mut sniffer = Sniffer::new(interface);
+
     let sniffer_result = sniffer.start(move |record| {
         if packet_tx.send(record).is_err() {
-            eprintln!("Packet channel closed. Sniffer cannot continue sending records.");
+            eprintln!(
+                "Packet channel closed. Sniffer cannot continue sending records."
+            );
         }
     });
 
     let _ = engine_handle.join();
     let _ = mitigator_handle.join();
 
-    sniffer_result.map_err(|error| Box::new(error) as Box<dyn std::error::Error>)
+    sniffer_result.map_err(|error| {
+        Box::new(error) as Box<dyn std::error::Error>
+    })
 }

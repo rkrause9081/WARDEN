@@ -1,11 +1,32 @@
-//! Axum web dashboard for The Warden.
-//!
-//! Final-phase dashboard upgrades:
-//! - event-driven SOC console state
-//! - live packets/alerts/bans/blockchain telemetry
-//! - Chart.js-ready history buffers
-//! - incident timeline
-//! - browser-based JSONL verification
+/*
+ * web.rs
+ *
+ * Purpose:
+ *     Implements the WARDEN Axum-powered SOC dashboard backend.
+ *
+ * Responsibilities:
+ *     - Serve dashboard HTML/CSS/JS assets
+ *     - Store shared live dashboard state
+ *     - Track packet, alert, ban, blockchain, and verification telemetry
+ *     - Expose JSON API endpoints for the browser dashboard
+ *     - Provide browser-based alerts.jsonl verification
+ *
+ * Non-Responsibilities:
+ *     - Capturing packets
+ *     - Detecting attacks
+ *     - Applying firewall rules
+ *     - Submitting blockchain transactions
+ *
+ * Architecture:
+ *
+ *      Sniffer / Engine / Mitigator / Blockchain
+ *                      ↓
+ *               DashboardState
+ *                      ↓
+ *                 Axum Routes
+ *                      ↓
+ *              Browser Dashboard
+ */
 
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
@@ -28,13 +49,26 @@ use crate::types::{AlertEvent, Protocol};
 use crate::verify::verifier::verify_alert_log_line;
 use crate::verify::{VerificationResult, VerificationStatus};
 
+/* -------------------------------------------------------------------------- */
+/*                              Shared State Type                             */
+/* -------------------------------------------------------------------------- */
+
 pub type SharedDashboardState = Arc<Mutex<DashboardState>>;
+
+/* -------------------------------------------------------------------------- */
+/*                                  Constants                                 */
+/* -------------------------------------------------------------------------- */
 
 const MAX_RECENT_ITEMS: usize = 50;
 const MAX_HISTORY_POINTS: usize = 120;
+
 const INDEX_HTML: &str = include_str!("templates/index.html");
 const APP_JS: &str = include_str!("static/app.js");
 const STYLES_CSS: &str = include_str!("static/styles.css");
+
+/* -------------------------------------------------------------------------- */
+/*                              Dashboard State                               */
+/* -------------------------------------------------------------------------- */
 
 #[derive(Debug, Clone, Serialize)]
 pub struct DashboardState {
@@ -43,26 +77,35 @@ pub struct DashboardState {
     pub bans_seen: u64,
     pub blockchain_events_seen: u64,
     pub verifications_seen: u64,
+
     pub mqtt_packets: u64,
     pub coap_packets: u64,
+
     pub peak_pps: f64,
     pub current_pps: f64,
     pub dry_run: Option<bool>,
+
     pub last_alert: Option<AlertView>,
     pub top_talkers: HashMap<String, f64>,
     pub active_bans: HashMap<String, BanView>,
+
     pub recent_packets: Vec<PacketView>,
     pub recent_alerts: Vec<AlertView>,
     pub recent_bans: Vec<BanView>,
     pub blockchain_events: Vec<BlockchainEventView>,
     pub timeline: Vec<TimelineEventView>,
+
     pub packet_history: Vec<MetricPoint>,
     pub alert_history: Vec<MetricPoint>,
     pub pps_history: Vec<MetricPointF64>,
+
     pub protocol_counts: ProtocolCounts,
 }
 
 impl DashboardState {
+    /**
+     * Creates an empty dashboard state snapshot.
+     */
     pub fn new() -> Self {
         Self {
             packets_seen: 0,
@@ -70,32 +113,45 @@ impl DashboardState {
             bans_seen: 0,
             blockchain_events_seen: 0,
             verifications_seen: 0,
+
             mqtt_packets: 0,
             coap_packets: 0,
+
             peak_pps: 0.0,
             current_pps: 0.0,
             dry_run: None,
+
             last_alert: None,
             top_talkers: HashMap::new(),
             active_bans: HashMap::new(),
+
             recent_packets: Vec::new(),
             recent_alerts: Vec::new(),
             recent_bans: Vec::new(),
             blockchain_events: Vec::new(),
             timeline: Vec::new(),
+
             packet_history: Vec::new(),
             alert_history: Vec::new(),
             pps_history: Vec::new(),
+
             protocol_counts: ProtocolCounts::default(),
         }
     }
 
+    /**
+     * Creates thread-safe shared dashboard state.
+     */
     pub fn shared() -> SharedDashboardState {
         Arc::new(Mutex::new(Self::new()))
     }
 
+    /**
+     * Records whether mitigation is running in dry-run or live mode.
+     */
     pub fn set_mitigator_mode(&mut self, dry_run: bool) {
         self.dry_run = Some(dry_run);
+
         self.record_timeline(
             "MITIGATOR".to_string(),
             if dry_run {
@@ -107,9 +163,18 @@ impl DashboardState {
         );
     }
 
-    pub fn record_packet(&mut self, src_ip: IpAddr, dst_ip: IpAddr, protocol: Protocol, pps: f64) {
+    /**
+     * Records live packet telemetry for dashboard rendering.
+     */
+    pub fn record_packet(
+        &mut self,
+        src_ip: IpAddr,
+        dst_ip: IpAddr,
+        protocol: Protocol,
+        pps: f64,
+    ) {
         self.packets_seen += 1;
-        self.current_pps = pps;
+        self.current_pps = round_2(pps);
         self.peak_pps = self.peak_pps.max(pps);
         self.top_talkers.insert(src_ip.to_string(), round_2(pps));
 
@@ -155,6 +220,9 @@ impl DashboardState {
         );
     }
 
+    /**
+     * Records IDS alert telemetry.
+     */
     pub fn record_alert(&mut self, alert: &AlertEvent) {
         self.alerts_seen += 1;
 
@@ -169,7 +237,9 @@ impl DashboardState {
         };
 
         self.last_alert = Some(view.clone());
+
         push_capped(&mut self.recent_alerts, view.clone(), MAX_RECENT_ITEMS);
+
         push_capped(
             &mut self.alert_history,
             MetricPoint {
@@ -189,6 +259,9 @@ impl DashboardState {
         );
     }
 
+    /**
+     * Records mitigation activity.
+     */
     pub fn record_ban(
         &mut self,
         src_ip: IpAddr,
@@ -211,6 +284,7 @@ impl DashboardState {
         };
 
         self.active_bans.insert(src_ip.to_string(), view.clone());
+
         push_capped(&mut self.recent_bans, view.clone(), MAX_RECENT_ITEMS);
 
         self.record_timeline(
@@ -224,8 +298,12 @@ impl DashboardState {
         );
     }
 
+    /**
+     * Records ban removal.
+     */
     pub fn record_unban(&mut self, src_ip: IpAddr) {
         self.active_bans.remove(&src_ip.to_string());
+
         self.record_timeline(
             "MITIGATION".to_string(),
             format!("Ban lifted for {src_ip}"),
@@ -233,6 +311,9 @@ impl DashboardState {
         );
     }
 
+    /**
+     * Records successful blockchain evidence anchoring.
+     */
     pub fn record_blockchain_event(
         &mut self,
         tx_hash: String,
@@ -256,6 +337,7 @@ impl DashboardState {
         };
 
         push_capped(&mut self.blockchain_events, event.clone(), MAX_RECENT_ITEMS);
+
         self.record_timeline(
             "BLOCKCHAIN".to_string(),
             format!("Evidence anchored on-chain in tx {}", event.tx_hash),
@@ -263,7 +345,15 @@ impl DashboardState {
         );
     }
 
-    pub fn record_blockchain_error(&mut self, src_ip: String, protocol: String, error: String) {
+    /**
+     * Records failed blockchain anchoring.
+     */
+    pub fn record_blockchain_error(
+        &mut self,
+        src_ip: String,
+        protocol: String,
+        error: String,
+    ) {
         push_capped(
             &mut self.blockchain_events,
             BlockchainEventView {
@@ -278,21 +368,40 @@ impl DashboardState {
             },
             MAX_RECENT_ITEMS,
         );
-        self.record_timeline("BLOCKCHAIN".to_string(), "Blockchain anchoring failed".to_string(), "WARN");
+
+        self.record_timeline(
+            "BLOCKCHAIN".to_string(),
+            "Blockchain anchoring failed".to_string(),
+            "WARN",
+        );
     }
 
+    /**
+     * Records the result of a browser-side JSONL verification request.
+     */
     pub fn record_verification_summary(&mut self, summary: &VerificationSummary) {
         self.verifications_seen += 1;
+
         self.record_timeline(
             "VERIFICATION".to_string(),
             format!(
                 "Evidence verification complete: {} valid, {} tampered, {} missing hashes, {} parse errors",
-                summary.valid, summary.tampered, summary.missing_hash, summary.parse_errors
+                summary.valid,
+                summary.tampered,
+                summary.missing_hash,
+                summary.parse_errors
             ),
-            if summary.tampered > 0 || summary.parse_errors > 0 { "CRITICAL" } else { "INFO" },
+            if summary.tampered > 0 || summary.parse_errors > 0 {
+                "CRITICAL"
+            } else {
+                "INFO"
+            },
         );
     }
 
+    /**
+     * Records one incident timeline entry.
+     */
     pub fn record_timeline(&mut self, stage: String, message: String, severity: &str) {
         push_capped(
             &mut self.timeline,
@@ -306,6 +415,10 @@ impl DashboardState {
         );
     }
 }
+
+/* -------------------------------------------------------------------------- */
+/*                             Dashboard DTO Types                            */
+/* -------------------------------------------------------------------------- */
 
 #[derive(Debug, Clone, Serialize)]
 pub struct PacketView {
@@ -410,6 +523,10 @@ struct VerificationResultView {
     error: Option<String>,
 }
 
+/* -------------------------------------------------------------------------- */
+/*                               Axum Server                                  */
+/* -------------------------------------------------------------------------- */
+
 pub async fn start_dashboard(
     state: SharedDashboardState,
     bind_addr: SocketAddr,
@@ -426,21 +543,34 @@ pub async fn start_dashboard(
     println!("Dashboard listening on http://{bind_addr}");
 
     let listener = tokio::net::TcpListener::bind(bind_addr).await?;
+
     axum::serve(listener, app).await?;
 
     Ok(())
 }
+
+/* -------------------------------------------------------------------------- */
+/*                              Route Handlers                                */
+/* -------------------------------------------------------------------------- */
 
 async fn index() -> impl IntoResponse {
     Html(INDEX_HTML)
 }
 
 async fn app_js() -> Response {
-    ([(header::CONTENT_TYPE, "application/javascript; charset=utf-8")], APP_JS).into_response()
+    (
+        [(header::CONTENT_TYPE, "application/javascript; charset=utf-8")],
+        APP_JS,
+    )
+        .into_response()
 }
 
 async fn styles_css() -> Response {
-    ([(header::CONTENT_TYPE, "text/css; charset=utf-8")], STYLES_CSS).into_response()
+    (
+        [(header::CONTENT_TYPE, "text/css; charset=utf-8")],
+        STYLES_CSS,
+    )
+        .into_response()
 }
 
 async fn health() -> Json<HealthResponse> {
@@ -470,6 +600,7 @@ async fn verify_upload(
         .enumerate()
         .filter_map(|(index, line)| {
             let trimmed = line.trim();
+
             if trimmed.is_empty() {
                 None
             } else {
@@ -486,6 +617,10 @@ async fn verify_upload(
 
     Ok(Json(response))
 }
+
+/* -------------------------------------------------------------------------- */
+/*                           Verification Helpers                             */
+/* -------------------------------------------------------------------------- */
 
 fn build_verification_response(results: Vec<VerificationResult>) -> VerificationResponse {
     let mut summary = VerificationSummary {
@@ -534,8 +669,13 @@ fn build_verification_response(results: Vec<VerificationResult>) -> Verification
     }
 }
 
+/* -------------------------------------------------------------------------- */
+/*                              Utility Helpers                               */
+/* -------------------------------------------------------------------------- */
+
 fn push_capped<T>(items: &mut Vec<T>, item: T, max_items: usize) {
     items.push(item);
+
     if items.len() > max_items {
         let extra = items.len() - max_items;
         items.drain(0..extra);
@@ -544,6 +684,7 @@ fn push_capped<T>(items: &mut Vec<T>, item: T, max_items: usize) {
 
 fn now_rfc3339() -> String {
     let now: DateTime<Utc> = SystemTime::now().into();
+
     now.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
 }
 
